@@ -44,7 +44,3 @@ Builds the app for production to the `build` folder, optimized for performance.
 ## License
 
 MIT License
-
-## Developed By
-
-Chance Jiajie Li, MIT
