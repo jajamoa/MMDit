@@ -1,5 +1,8 @@
 # MMDit - Mermaid Markdown Visualizer
 
+![MMDit Banner](assets/images/mmdit_banner.png)
+
+
 MMDit is an elegant, interactive visualization tool for Mermaid Markdown network graphs. It allows users to upload, visualize, and manipulate network diagrams with multiple layout options.
 
 ## Features
@@ -9,6 +12,7 @@ MMDit is an elegant, interactive visualization tool for Mermaid Markdown network
 - **File Management**: Save and organize multiple graphs with an intuitive file management sidebar
 - **Interaction**: Pan, zoom, and drag nodes to explore complex network relationships
 - **Clean UI**: Minimalist black and white interface focused on your data visualization
+
 
 ## Getting Started
 
