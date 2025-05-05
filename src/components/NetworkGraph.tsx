@@ -11,8 +11,10 @@ import ReactFlow, {
   MarkerType,
   getBezierPath,
   EdgeProps,
+  ConnectionLineType,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
+import SplineEdge from './SplineEdge';
 
 // Add type definition with support for className
 interface CustomNodeData {
@@ -50,7 +52,7 @@ interface NetworkGraphProps {
   layout?: 'default' | 'force' | 'tree';
 }
 
-// Improved tree layout algorithm
+// Improved tree layout algorithm for causal networks
 const applyTreeLayout = (nodes: Node[], edges: Edge[]): Node[] => {
   if (nodes.length === 0) return [];
   
@@ -66,6 +68,8 @@ const applyTreeLayout = (nodes: Node[], edges: Edge[]): Node[] => {
   
   // Build adjacency list for the graph
   const adjacencyList = new Map<string, Set<string>>();
+  const reverseAdjacencyList = new Map<string, Set<string>>();
+  
   edges.forEach(edge => {
     if (!adjacencyList.has(edge.source)) {
       adjacencyList.set(edge.source, new Set());
@@ -73,104 +77,288 @@ const applyTreeLayout = (nodes: Node[], edges: Edge[]): Node[] => {
     if (!adjacencyList.has(edge.target)) {
       adjacencyList.set(edge.target, new Set());
     }
+    if (!reverseAdjacencyList.has(edge.target)) {
+      reverseAdjacencyList.set(edge.target, new Set());
+    }
+    if (!reverseAdjacencyList.has(edge.source)) {
+      reverseAdjacencyList.set(edge.source, new Set());
+    }
     
-    // Add connections (source to target only for tree direction)
+    // Add connections (source to target)
     adjacencyList.get(edge.source)?.add(edge.target);
+    // Track reverse connections (target to source) for finding leaf nodes
+    reverseAdjacencyList.get(edge.target)?.add(edge.source);
   });
   
-  // Find root node (node without incoming edges)
-  let rootId = '';
+  // Find leaf nodes (nodes with out-degree = 0)
+  const leafNodes = nodesCopy
+    .filter(node => !adjacencyList.has(node.id) || adjacencyList.get(node.id)?.size === 0)
+    .map(node => node.id);
   
-  // Find all nodes with incoming edges
-  const incomingEdges = new Map<string, number>();
-  edges.forEach(edge => {
-    incomingEdges.set(edge.target, (incomingEdges.get(edge.target) || 0) + 1);
-  });
+  // Find root nodes (nodes with in-degree = 0)
+  const rootNodes = nodesCopy
+    .filter(node => !reverseAdjacencyList.has(node.id) || reverseAdjacencyList.get(node.id)?.size === 0)
+    .map(node => node.id);
   
-  // Nodes without incoming edges are potential roots
-  const potentialRoots = nodesCopy.filter(node => !incomingEdges.has(node.id));
+  console.log("Leaf nodes:", leafNodes);
+  console.log("Root nodes:", rootNodes);
   
-  if (potentialRoots.length > 0) {
-    rootId = potentialRoots[0].id;
-  } else if (nodesCopy.length > 0) {
-    rootId = nodesCopy[0].id;
-  }
-  
-  // Use BFS to assign node levels
+  // Use topological sorting to assign levels
   const visited = new Set<string>();
   const levels = new Map<string, number>();
   const levelNodes = new Map<number, string[]>();
   
-  const queue = [rootId];
-  levels.set(rootId, 0);
-  if (!levelNodes.has(0)) levelNodes.set(0, []);
-  levelNodes.get(0)?.push(rootId);
-  visited.add(rootId);
-  
-  while (queue.length > 0) {
-    const currentId = queue.shift()!;
-    const currentLevel = levels.get(currentId)!;
-    const nextLevel = currentLevel + 1;
-    
-    const neighbors = adjacencyList.get(currentId);
-    if (neighbors) {
-      // Convert Set to Array to avoid iteration issues
-      Array.from(neighbors).forEach(neighborId => {
-        if (!visited.has(neighborId)) {
-          visited.add(neighborId);
-          levels.set(neighborId, nextLevel);
-          
-          if (!levelNodes.has(nextLevel)) {
-            levelNodes.set(nextLevel, []);
-          }
-          levelNodes.get(nextLevel)?.push(neighborId);
-          
-          queue.push(neighborId);
+  // Start with a modified DFS from root nodes to assign proper levels
+  const assignLevels = (nodeId: string, level: number) => {
+    if (visited.has(nodeId)) {
+      // If node already visited, assign it to the maximum level found so far
+      if ((levels.get(nodeId) || 0) < level) {
+        // Remove from previous level
+        const prevLevel = levels.get(nodeId) || 0;
+        const prevLevelNodes = levelNodes.get(prevLevel) || [];
+        levelNodes.set(prevLevel, prevLevelNodes.filter(id => id !== nodeId));
+        
+        // Assign to new level
+        levels.set(nodeId, level);
+        if (!levelNodes.has(level)) {
+          levelNodes.set(level, []);
         }
+        levelNodes.get(level)?.push(nodeId);
+      }
+      return;
+    }
+    
+    visited.add(nodeId);
+    levels.set(nodeId, level);
+    
+    if (!levelNodes.has(level)) {
+      levelNodes.set(level, []);
+    }
+    levelNodes.get(level)?.push(nodeId);
+    
+    // Process children (if any)
+    const children = adjacencyList.get(nodeId);
+    if (children) {
+      Array.from(children).forEach(childId => {
+        assignLevels(childId, level + 1);
       });
     }
-  }
+  };
   
-  // Assign levels to any disconnected nodes
+  // Start with root nodes at level 0
+  rootNodes.forEach(nodeId => {
+    assignLevels(nodeId, 0);
+  });
+  
+  // Handle any disconnected nodes
   nodesCopy.forEach(node => {
     if (!visited.has(node.id)) {
-      // Find max level and add unconnected nodes to the next level
-      const levelsArray = Array.from(levels.values());
-      const maxLevel = levelsArray.length > 0 ? Math.max(...levelsArray) : 0;
-      const specialLevel = maxLevel + 1;
+      // Try to determine a reasonable level based on connections
+      const parents = reverseAdjacencyList.get(node.id);
+      const children = adjacencyList.get(node.id);
       
-      levels.set(node.id, specialLevel);
-      
-      if (!levelNodes.has(specialLevel)) {
-        levelNodes.set(specialLevel, []);
+      if (parents && parents.size > 0) {
+        // Place based on parent levels
+        const parentLevels = Array.from(parents)
+          .map(parentId => levels.get(parentId) || 0)
+          .filter(level => level !== undefined);
+        
+        if (parentLevels.length > 0) {
+          const level = Math.max(...parentLevels) + 1;
+          assignLevels(node.id, level);
+        } else {
+          assignLevels(node.id, 0); // Default to top level
+        }
+      } else if (children && children.size > 0) {
+        // Place based on children levels
+        const childLevels = Array.from(children)
+          .map(childId => levels.get(childId) || 0)
+          .filter(level => level !== undefined);
+        
+        if (childLevels.length > 0) {
+          const level = Math.min(...childLevels) - 1;
+          assignLevels(node.id, Math.max(0, level));
+        } else {
+          assignLevels(node.id, 0); // Default to top level
+        }
+      } else {
+        // Completely disconnected node
+        assignLevels(node.id, 0);
       }
-      levelNodes.get(specialLevel)?.push(node.id);
     }
   });
   
   // Calculate positions for each node by level
   const levelCount = levelNodes.size;
-  const verticalSpacing = 120; // Reduced vertical spacing
-  const centerX = 400;
-  const startY = 80;
+  const verticalSpacing = 120; // Vertical spacing between levels
+  const centerX = 600; // Center X position for the entire layout
+  const startY = 120; // Start from top (roots)
   
-  // Place nodes by level (top to bottom)
+  // Find central alignment axis based on middle nodes of odd-numbered rows
+  // This will be our vertical alignment reference
+  let centralAxis = centerX;
+  const estimateNodeWidth = (nodeId: string): number => {
+    const node = nodeMap.get(nodeId);
+    if (!node) return 180; // Default width estimate
+    
+    // Get node label to estimate width
+    const nodeData = node.data as CustomNodeData;
+    const label = nodeData.label || '';
+    
+    // Handle multiline labels by finding the longest line
+    let maxLineLength = 0;
+    if (label.includes('\n')) {
+      const lines = label.split('\n');
+      for (const line of lines) {
+        maxLineLength = Math.max(maxLineLength, line.length);
+      }
+    } else {
+      maxLineLength = label.length;
+    }
+    
+    // Special case for certain node types that may need more space
+    const className = nodeData.className;
+    
+    // Calculate width based on label length and node type
+    // Character width multiplier varies by font, around 8px per character is reasonable
+    let estimatedWidth = Math.max(180, maxLineLength * 8.5);
+    
+    // Add additional padding for certain classes
+    if (className && CLASS_STYLES[className]) {
+      if (className === 'factorNode') {
+        estimatedWidth = Math.max(estimatedWidth, 200); // Minimum width for factor nodes
+      } else if (className === 'stanceNode') {
+        estimatedWidth = Math.max(estimatedWidth, 180); // Minimum width for stance nodes
+      }
+    }
+    
+    // Add padding for margins and borders
+    estimatedWidth += 32; // 16px padding on each side
+    
+    return estimatedWidth;
+  };
+  
+  // First pass: determine central alignment axis from odd rows
   for (let level = 0; level < levelCount; level++) {
     const nodesInLevel = levelNodes.get(level) || [];
-    const nodeHorizontalSpacing = 200; // Reduced horizontal spacing
     
-    // Calculate total width needed for this level
-    const levelWidth = nodesInLevel.length * nodeHorizontalSpacing;
-    const startX = centerX - levelWidth / 2 + nodeHorizontalSpacing / 2;
+    // Only process odd-numbered rows with at least one node for central alignment
+    if (nodesInLevel.length % 2 === 1 && nodesInLevel.length > 0) {
+      // Find the middle node in this odd-numbered row
+      const middleIndex = Math.floor(nodesInLevel.length / 2);
+      const middleNodeId = nodesInLevel[middleIndex];
+      
+      // We've found a middle node to use as reference for central alignment
+      // We can break as we only need one reference point
+      centralAxis = centerX;
+      break;
+    }
+  }
+  
+  // Position nodes level by level (top to bottom)
+  for (let level = 0; level < levelCount; level++) {
+    const nodesInLevel = levelNodes.get(level) || [];
     
-    // Position each node in this level
-    nodesInLevel.forEach((nodeId, index) => {
-      const node = nodeMap.get(nodeId);
+    // Sort nodes within each level to minimize edge crossings
+    // This is a simple heuristic - position nodes closer to their connections
+    nodesInLevel.sort((a, b) => {
+      const aConnectionsSet = adjacencyList.get(a) || new Set();
+      const aReverseConnectionsSet = reverseAdjacencyList.get(a) || new Set();
+      const bConnectionsSet = adjacencyList.get(b) || new Set(); 
+      const bReverseConnectionsSet = reverseAdjacencyList.get(b) || new Set();
+      
+      const aConnections = Array.from(aConnectionsSet).concat(Array.from(aReverseConnectionsSet));
+      const bConnections = Array.from(bConnectionsSet).concat(Array.from(bReverseConnectionsSet));
+      
+      // More connections should generally be placed more centrally
+      return bConnections.length - aConnections.length;
+    });
+    
+    // Increase horizontal spacing between nodes
+    // Use a more generous spacing calculation based on the number of nodes
+    // Minimum spacing increases to prevent crowding
+    const baseSpacing = 220; // Minimum base spacing between node centers
+    const adaptiveSpacing = Math.max(
+      baseSpacing, 
+      1200 / (nodesInLevel.length || 1), // More space for fewer nodes
+    );
+    
+    // Calculate positions accounting for node widths for center alignment
+    let positions: Array<{id: string, centerX: number, width: number}> = [];
+    
+    // Special alignment for odd-numbered rows
+    if (nodesInLevel.length % 2 === 1) {
+      // Odd number of nodes - middle node will be at central axis
+      const middleIndex = Math.floor(nodesInLevel.length / 2);
+      
+      // Process each node from middle outward
+      for (let i = 0; i < nodesInLevel.length; i++) {
+        const nodeId = nodesInLevel[i];
+        const nodeWidth = estimateNodeWidth(nodeId);
+        
+        let nodeCenterX = 0;
+        
+        if (i === middleIndex) {
+          // Center middle node exactly on central axis
+          nodeCenterX = centralAxis;
+        } else if (i < middleIndex) {
+          // Nodes to the left of middle
+          const distanceFromMiddle = middleIndex - i;
+          nodeCenterX = centralAxis - (distanceFromMiddle * adaptiveSpacing);
+        } else {
+          // Nodes to the right of middle
+          const distanceFromMiddle = i - middleIndex;
+          nodeCenterX = centralAxis + (distanceFromMiddle * adaptiveSpacing);
+        }
+        
+        positions.push({id: nodeId, centerX: nodeCenterX, width: nodeWidth});
+      }
+    } else if (nodesInLevel.length > 0) {
+      // Even number of nodes - space evenly around central axis
+      const halfCount = nodesInLevel.length / 2;
+      
+      // Process each node from middle outward
+      for (let i = 0; i < nodesInLevel.length; i++) {
+        const nodeId = nodesInLevel[i];
+        const nodeWidth = estimateNodeWidth(nodeId);
+        
+        // For even rows, space nodes evenly on both sides of central axis
+        // leaving a gap in the middle
+        let nodeCenterX = 0;
+        
+        if (i < halfCount) {
+          // Nodes on the left side
+          const distanceFromCenter = halfCount - i - 0.5;
+          nodeCenterX = centralAxis - (distanceFromCenter * adaptiveSpacing);
+        } else {
+          // Nodes on the right side
+          const distanceFromCenter = i - halfCount + 0.5;
+          nodeCenterX = centralAxis + (distanceFromCenter * adaptiveSpacing);
+        }
+        
+        positions.push({id: nodeId, centerX: nodeCenterX, width: nodeWidth});
+      }
+    }
+    
+    // Apply calculated positions to nodes, converting center positions to react-flow's top-left coordinate system
+    positions.forEach(({id, centerX, width}) => {
+      const node = nodeMap.get(id);
       if (node) {
+        // Transform from center coordinate to left edge coordinate (React Flow uses top-left positioning)
+        const leftEdgeX = centerX - (width / 2);
+        
         node.position = {
-          x: startX + index * nodeHorizontalSpacing,
+          x: leftEdgeX,
           y: startY + level * verticalSpacing
         };
+        
+        // Store width in node data for proper rendering
+        if (node.data) {
+          node.data = {
+            ...node.data,
+            width: width
+          };
+        }
       }
     });
   }
@@ -323,9 +511,15 @@ const applyForceLayout = (nodes: Node[], edges: Edge[]): Node[] => {
 // Custom node component for handling multiline text
 const MultiLineNode = ({ data }: { data: any }) => {
   const lines = data.label.split('\n');
+  const nodeWidth = data.width || 'auto'; // Use width from layout calculation if available
   
   return (
-    <div style={{ padding: '10px', textAlign: 'center' }}>
+    <div style={{ 
+      padding: '10px', 
+      textAlign: 'center',
+      width: typeof nodeWidth === 'number' ? `${nodeWidth}px` : nodeWidth,
+      boxSizing: 'border-box'
+    }}>
       {lines.map((line: string, i: number) => (
         <div key={i}>{line}</div>
       ))}
@@ -367,6 +561,7 @@ const NetworkGraph: React.FC<NetworkGraphProps> = ({
       // Get className from node data
       const nodeData = node.data as CustomNodeData;
       const className = nodeData.className;
+      const nodeWidth = nodeData.width || 180; // Use width from layout algorithm if available
       let nodeStyle = { ...node.style };
       
       // Check if the label contains newlines
@@ -380,15 +575,22 @@ const NetworkGraph: React.FC<NetworkGraphProps> = ({
         };
       }
       
-      // Add styles for multi-line text
+      // Add styles for multi-line text and apply calculated width
       if (hasMultipleLines) {
         nodeStyle = {
           ...nodeStyle,
           whiteSpace: 'pre-wrap',
           textAlign: 'center',
-          width: 'auto',
+          width: `${nodeWidth}px`,
           minWidth: '180px',
           maxWidth: '400px',
+        };
+      } else {
+        // Apply width for single-line text
+        nodeStyle = {
+          ...nodeStyle,
+          width: `${nodeWidth}px`,
+          textAlign: 'center',
         };
       }
       
@@ -398,8 +600,28 @@ const NetworkGraph: React.FC<NetworkGraphProps> = ({
       };
     });
     
-    // Preserve edge styles
-    const styledEdges = initialEdges;
+    // Preserve edge styles for non-tree layouts
+    let styledEdges = initialEdges;
+    
+    // Apply special edge type for tree layout
+    if (layout === 'tree') {
+      styledEdges = initialEdges.map(edge => ({
+        ...edge,
+        type: 'spline', // Use our custom spline edge
+        animated: false,
+        style: {
+          ...edge.style,
+          stroke: '#2E8B57', // Use consistent color
+          strokeWidth: 1.5,
+        },
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          width: 13,
+          height: 13,
+          color: '#2E8B57',
+        }
+      }));
+    }
     
     setNodes(styledNodes);
     setEdges(styledEdges);
@@ -430,6 +652,11 @@ const NetworkGraph: React.FC<NetworkGraphProps> = ({
     multiline: MultiLineNode,
   }), []);
 
+  // Register custom edge types
+  const edgeTypes = useMemo(() => ({
+    spline: SplineEdge,
+  }), []);
+
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative' }}>
       <ReactFlow
@@ -439,19 +666,21 @@ const NetworkGraph: React.FC<NetworkGraphProps> = ({
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         fitView
         fitViewOptions={{ 
-          padding: 0.2,
-          minZoom: 0.5,
+          padding: 0.3,
+          minZoom: 0.4,
           maxZoom: 1.5,
           duration: 0
         }}
         defaultEdgeOptions={{
-          type: 'straight',
+          type: layout === 'tree' ? 'spline' : 'straight',
           style: { 
             strokeWidth: 1,
           }
         }}
+        connectionLineType={layout === 'tree' ? ConnectionLineType.SmoothStep : ConnectionLineType.Straight}
         connectionMode={ConnectionMode.Loose}
         nodesDraggable={true}
         nodesConnectable={false}
