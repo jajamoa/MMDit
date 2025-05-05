@@ -524,8 +524,11 @@ export const parseMermaidFile = async (content: string): Promise<ParsedGraph> =>
         source,
         target,
         label,
-        type: 'default',
+        type: isNegative ? '--x' : 'default',
         animated: false,
+        data: {
+          isNegative: isNegative,
+        },
         markerEnd: {
           type: MarkerType.ArrowClosed,
           width: 13,

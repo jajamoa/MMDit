@@ -103,93 +103,122 @@ const applyTreeLayout = (nodes: Node[], edges: Edge[]): Node[] => {
   console.log("Leaf nodes:", leafNodes);
   console.log("Root nodes:", rootNodes);
   
-  // Use topological sorting to assign levels
+  // Force leaf nodes (out-degree = 0) to be at the bottom level
+  // We'll use a bottom-up level assignment approach
   const visited = new Set<string>();
   const levels = new Map<string, number>();
   const levelNodes = new Map<number, string[]>();
   
-  // Start with a modified DFS from root nodes to assign proper levels
-  const assignLevels = (nodeId: string, level: number) => {
-    if (visited.has(nodeId)) {
-      // If node already visited, assign it to the maximum level found so far
-      if ((levels.get(nodeId) || 0) < level) {
-        // Remove from previous level
+  // Start by assigning the leaf nodes to the maximum level
+  const maxLevel = 1000; // Initialize with a high number, will be adjusted later
+  
+  // First, assign leaf nodes to the max level
+  leafNodes.forEach(nodeId => {
+    levels.set(nodeId, maxLevel);
+    if (!levelNodes.has(maxLevel)) {
+      levelNodes.set(maxLevel, []);
+    }
+    levelNodes.get(maxLevel)?.push(nodeId);
+    visited.add(nodeId);
+  });
+  
+  // Then perform a bottom-up traversal, assigning levels to other nodes
+  const assignLevelsBottomUp = (nodeId: string, level: number) => {
+    // Process a node only if:
+    // 1. It hasn't been visited yet, OR
+    // 2. We can assign it a lower level (closer to top)
+    if (!visited.has(nodeId) || (levels.get(nodeId) || 0) > level) {
+      // If it was already assigned to a different level, remove it from there
+      if (visited.has(nodeId)) {
         const prevLevel = levels.get(nodeId) || 0;
         const prevLevelNodes = levelNodes.get(prevLevel) || [];
         levelNodes.set(prevLevel, prevLevelNodes.filter(id => id !== nodeId));
-        
-        // Assign to new level
-        levels.set(nodeId, level);
-        if (!levelNodes.has(level)) {
-          levelNodes.set(level, []);
-        }
-        levelNodes.get(level)?.push(nodeId);
       }
-      return;
-    }
-    
-    visited.add(nodeId);
-    levels.set(nodeId, level);
-    
-    if (!levelNodes.has(level)) {
-      levelNodes.set(level, []);
-    }
-    levelNodes.get(level)?.push(nodeId);
-    
-    // Process children (if any)
-    const children = adjacencyList.get(nodeId);
-    if (children) {
-      Array.from(children).forEach(childId => {
-        assignLevels(childId, level + 1);
-      });
+      
+      // Assign to new level
+      visited.add(nodeId);
+      levels.set(nodeId, level);
+      
+      if (!levelNodes.has(level)) {
+        levelNodes.set(level, []);
+      }
+      levelNodes.get(level)?.push(nodeId);
+      
+      // Process parents (bottom-up)
+      const parents = reverseAdjacencyList.get(nodeId);
+      if (parents) {
+        Array.from(parents).forEach(parentId => {
+          assignLevelsBottomUp(parentId, level - 1);
+        });
+      }
     }
   };
   
-  // Start with root nodes at level 0
-  rootNodes.forEach(nodeId => {
-    assignLevels(nodeId, 0);
+  // Start bottom-up traversal from leaf nodes
+  leafNodes.forEach(nodeId => {
+    const parents = reverseAdjacencyList.get(nodeId);
+    if (parents) {
+      Array.from(parents).forEach(parentId => {
+        assignLevelsBottomUp(parentId, maxLevel - 1);
+      });
+    }
   });
   
-  // Handle any disconnected nodes
+  // Handle disconnected nodes and root nodes that might not have been visited
   nodesCopy.forEach(node => {
     if (!visited.has(node.id)) {
-      // Try to determine a reasonable level based on connections
-      const parents = reverseAdjacencyList.get(node.id);
-      const children = adjacencyList.get(node.id);
-      
-      if (parents && parents.size > 0) {
-        // Place based on parent levels
-        const parentLevels = Array.from(parents)
-          .map(parentId => levels.get(parentId) || 0)
-          .filter(level => level !== undefined);
-        
-        if (parentLevels.length > 0) {
-          const level = Math.max(...parentLevels) + 1;
-          assignLevels(node.id, level);
-        } else {
-          assignLevels(node.id, 0); // Default to top level
+      // If it's a root node, assign it to level 0
+      if (rootNodes.includes(node.id)) {
+        visited.add(node.id);
+        levels.set(node.id, 0);
+        if (!levelNodes.has(0)) {
+          levelNodes.set(0, []);
         }
-      } else if (children && children.size > 0) {
-        // Place based on children levels
-        const childLevels = Array.from(children)
-          .map(childId => levels.get(childId) || 0)
-          .filter(level => level !== undefined);
-        
-        if (childLevels.length > 0) {
-          const level = Math.min(...childLevels) - 1;
-          assignLevels(node.id, Math.max(0, level));
-        } else {
-          assignLevels(node.id, 0); // Default to top level
-        }
+        levelNodes.get(0)?.push(node.id);
       } else {
-        // Completely disconnected node
-        assignLevels(node.id, 0);
+        // For truly disconnected nodes, assign to a middle level
+        const midLevel = Math.floor(maxLevel / 2);
+        visited.add(node.id);
+        levels.set(node.id, midLevel);
+        if (!levelNodes.has(midLevel)) {
+          levelNodes.set(midLevel, []);
+        }
+        levelNodes.get(midLevel)?.push(node.id);
       }
     }
   });
   
+  // Normalize levels (compress the level numbers to be consecutive starting from 0)
+  const usedLevels = Array.from(levelNodes.keys()).sort((a, b) => a - b);
+  const normalizedLevels = new Map<number, number>();
+  
+  usedLevels.forEach((level, index) => {
+    normalizedLevels.set(level, index);
+  });
+  
+  // Create new level assignments with normalized level numbers
+  const normalizedLevelNodes = new Map<number, string[]>();
+  
+  levelNodes.forEach((nodeIds, level) => {
+    const normalizedLevel = normalizedLevels.get(level) || 0;
+    
+    if (!normalizedLevelNodes.has(normalizedLevel)) {
+      normalizedLevelNodes.set(normalizedLevel, []);
+    }
+    
+    normalizedLevelNodes.get(normalizedLevel)?.push(...nodeIds);
+    
+    // Update levels map for each node
+    nodeIds.forEach(nodeId => {
+      levels.set(nodeId, normalizedLevel);
+    });
+  });
+  
+  // Use normalized level nodes from now on
+  const finalLevelNodes = normalizedLevelNodes;
+  
   // Calculate positions for each node by level
-  const levelCount = levelNodes.size;
+  const levelCount = finalLevelNodes.size;
   const verticalSpacing = 120; // Vertical spacing between levels
   const centerX = 600; // Center X position for the entire layout
   const startY = 120; // Start from top (roots)
@@ -240,7 +269,7 @@ const applyTreeLayout = (nodes: Node[], edges: Edge[]): Node[] => {
   
   // First pass: determine central alignment axis from odd rows
   for (let level = 0; level < levelCount; level++) {
-    const nodesInLevel = levelNodes.get(level) || [];
+    const nodesInLevel = finalLevelNodes.get(level) || [];
     
     // Only process odd-numbered rows with at least one node for central alignment
     if (nodesInLevel.length % 2 === 1 && nodesInLevel.length > 0) {
@@ -257,7 +286,7 @@ const applyTreeLayout = (nodes: Node[], edges: Edge[]): Node[] => {
   
   // Position nodes level by level (top to bottom)
   for (let level = 0; level < levelCount; level++) {
-    const nodesInLevel = levelNodes.get(level) || [];
+    const nodesInLevel = finalLevelNodes.get(level) || [];
     
     // Sort nodes within each level to minimize edge crossings
     // This is a simple heuristic - position nodes closer to their connections
@@ -605,22 +634,56 @@ const NetworkGraph: React.FC<NetworkGraphProps> = ({
     
     // Apply special edge type for tree layout
     if (layout === 'tree') {
-      styledEdges = initialEdges.map(edge => ({
-        ...edge,
-        type: 'spline', // Use our custom spline edge
-        animated: false,
-        style: {
-          ...edge.style,
-          stroke: '#2E8B57', // Use consistent color
-          strokeWidth: 1.5,
-        },
-        markerEnd: {
-          type: MarkerType.ArrowClosed,
-          width: 13,
-          height: 13,
-          color: '#2E8B57',
-        }
-      }));
+      // Debug: Log initial edges to check their structure
+      console.log("Initial edges before styling:", initialEdges);
+      
+      styledEdges = initialEdges.map(edge => {
+        // Check original edge data for any indicators that this is a negative edge
+        const edgeType = edge.type || '';
+        
+        // Log each edge's type and data for debugging
+        console.log(`Processing edge ${edge.id}: type=${edgeType}, data=`, edge.data);
+        
+        // Expanded logic to detect negative edges:
+        // 1. Check edge type for '--x' or '---'
+        // 2. Check for data.negative property
+        // 3. Check for data.isNegative property
+        // 4. Look for "x" in the edge label if it exists
+        const isNegative = 
+          edgeType.includes('--x') || 
+          edgeType.includes('---') || 
+          (edge.data && edge.data.isNegative === true) ||
+          (edge.data && edge.data.negative === true) ||
+          (typeof edge.label === 'string' && edge.label.toLowerCase().includes('x'));
+        
+        // Log detection result
+        console.log(`Edge ${edge.id} isNegative: ${isNegative}`);
+        
+        return {
+          ...edge,
+          type: 'spline', // Always use our custom spline edge for tree layout
+          animated: false,
+          style: {
+            ...edge.style,
+            stroke: isNegative ? '#cc0000' : '#2E8B57', // Red for negative, green for positive
+            strokeWidth: 1.5,
+            strokeDasharray: isNegative ? '5,5' : undefined, // Dashed for negative edges
+          },
+          data: {
+            ...edge.data,
+            isNegative, // Make sure to add this to data
+          },
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            width: 13,
+            height: 13,
+            color: isNegative ? '#cc0000' : '#2E8B57', // Red arrow for negative edges
+          }
+        };
+      });
+      
+      // Log styled edges after processing
+      console.log("Styled edges after processing:", styledEdges);
     }
     
     setNodes(styledNodes);
